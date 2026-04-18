@@ -1,10 +1,14 @@
 import html
+import inspect
 import re
 from typing import Any
+
+from strix.tools.registry import get_tool_by_name, get_tool_param_schema
 
 
 _INVOKE_OPEN = re.compile(r'<invoke\s+name=["\']([^"\']+)["\']>')
 _PARAM_NAME_ATTR = re.compile(r'<parameter\s+name=["\']([^"\']+)["\']>')
+_PARAM_NAME_ATTR_MALFORMED = re.compile(r'<parameter\s+name=(["\'])([^"\'>]+)>')
 _FUNCTION_CALLS_TAG = re.compile(r"</?function_calls>")
 _STRIP_TAG_QUOTES = re.compile(r"<(function|parameter)\s*=\s*([^>]*?)>")
 
@@ -20,10 +24,12 @@ def normalize_tool_format(content: str) -> str:
       <function="X">                        → <function=X>
       <parameter="X">                       → <parameter=X>
     """
+    content = _PARAM_NAME_ATTR.sub(r"<parameter=\1>", content)
+    content = _PARAM_NAME_ATTR_MALFORMED.sub(r"<parameter=\2>", content)
+
     if "<invoke" in content or "<function_calls" in content:
         content = _FUNCTION_CALLS_TAG.sub("", content)
         content = _INVOKE_OPEN.sub(r"<function=\1>", content)
-        content = _PARAM_NAME_ATTR.sub(r"<parameter=\1>", content)
         content = content.replace("</invoke>", "</function>")
 
     return _STRIP_TAG_QUOTES.sub(
@@ -95,6 +101,7 @@ def parse_tool_invocations(content: str) -> list[dict[str, Any]] | None:
         param_matches = re.finditer(fn_param_regex_pattern, fn_body, re.DOTALL)
 
         args = {}
+        parse_error: str | None = None
         for param_match in param_matches:
             param_name = param_match.group(1)
             param_value = param_match.group(2).strip()
@@ -102,9 +109,78 @@ def parse_tool_invocations(content: str) -> list[dict[str, Any]] | None:
             param_value = html.unescape(param_value)
             args[param_name] = param_value
 
-        tool_invocations.append({"toolName": fn_name, "args": args})
+        if not args:
+            parse_error = _build_raw_body_parse_error(fn_name, fn_body)
+            raw_body_args = _extract_body_fallback_args(fn_name, fn_body)
+            if raw_body_args:
+                args = raw_body_args
+
+        tool_invocation: dict[str, Any] = {"toolName": fn_name, "args": args}
+        if not args and parse_error:
+            tool_invocation["parseError"] = parse_error
+
+        tool_invocations.append(tool_invocation)
 
     return tool_invocations if tool_invocations else None
+
+
+def _extract_body_fallback_args(tool_name: str, fn_body: str) -> dict[str, str]:
+    raw_body = html.unescape(fn_body).strip()
+    if not raw_body:
+        return {}
+
+    required_param = _get_single_required_parameter(tool_name)
+    if required_param:
+        return {required_param: raw_body}
+
+    param_schema = get_tool_param_schema(tool_name)
+    if not param_schema:
+        return {}
+
+    required_params = sorted(param_schema.get("required", set()))
+    if len(required_params) != 1:
+        return {}
+
+    return {required_params[0]: raw_body}
+
+
+def _build_raw_body_parse_error(tool_name: str, fn_body: str) -> str | None:
+    raw_body = html.unescape(fn_body).strip()
+    if not raw_body:
+        return None
+
+    param_schema = get_tool_param_schema(tool_name)
+    if not param_schema:
+        return None
+
+    required_params = sorted(param_schema.get("required", set()))
+    if len(required_params) <= 1:
+        return None
+
+    required_list = ", ".join(required_params)
+    return (
+        f"Tool '{tool_name}' could not parse raw body text into explicit parameters. "
+        f"Provide tagged arguments for required parameter(s): {required_list}"
+    )
+
+
+def _get_single_required_parameter(tool_name: str) -> str | None:
+    tool_func = get_tool_by_name(tool_name)
+    if tool_func is None:
+        return None
+
+    required_params = [
+        param.name
+        for param in inspect.signature(tool_func).parameters.values()
+        if param.name != "agent_state"
+        and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        and param.default is inspect.Parameter.empty
+    ]
+
+    if len(required_params) != 1:
+        return None
+
+    return required_params[0]
 
 
 def fix_incomplete_tool_call(content: str) -> str:

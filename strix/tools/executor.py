@@ -189,6 +189,10 @@ async def execute_tool_with_validation(
 async def execute_tool_invocation(tool_inv: dict[str, Any], agent_state: Any | None = None) -> Any:
     tool_name = tool_inv.get("toolName")
     tool_args = tool_inv.get("args", {})
+    parse_error = tool_inv.get("parseError")
+
+    if parse_error:
+        return f"Error: {parse_error}"
 
     return await execute_tool_with_validation(tool_name, agent_state, **tool_args)
 

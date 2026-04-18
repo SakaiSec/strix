@@ -116,6 +116,5 @@ def _convert_to_dict(value: str) -> dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     except json.JSONDecodeError:
-        return {}
-    else:
-        return {}
+        raise ValueError("Expected a JSON object string") from None
+    raise ValueError("Expected a JSON object string")
